@@ -49,7 +49,7 @@ app.post('/api/jobs', async (req, res) => {
   
       // Create document reference and set data
       const jobRef = await db.collection('jobs').add(processedData);
-  
+      await jobRef.update({ job_id: jobRef.id });
       res.status(201).json({ 
         id: jobRef.id,
         message: 'Job created successfully with milestones in same collection'
