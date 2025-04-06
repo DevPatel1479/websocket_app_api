@@ -9,6 +9,7 @@ expressWs(app);
 app.use(cors());
 app.use(bodyParser.json());
 
+
 // Initialize Firebase Admin
 // const serviceAccount = require('./serviceAccountKey.json');
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -16,6 +17,7 @@ const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DATABASE_URL
+  // databaseURL : "https://newtestproject-f7d42-default-rtdb.firebaseio.com/"
 });
 
 const db = admin.firestore();
@@ -59,6 +61,46 @@ app.post('/api/jobs', async (req, res) => {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
+
+app.get('/api/client/profile/:id', async (req, res)=>{
+  const uid = req.params.id;
+
+  if (!uid ){
+    const msg = {
+      "message" : "Client Id required!!"
+    }
+    return res.status(400).json(msg);
+
+  }
+    
+  try{
+    const docRef = db.collection('users').doc(uid);
+    const docSnap = await docRef.get();
+    console.log(docSnap.exists);
+    if (!docSnap.exists){
+      
+      return res.status(404).json({ message: "Client not found!" });
+    }else{
+      
+      const clientData = docSnap.data();
+      delete clientData.password;
+      delete clientData.createdAt;
+      return res.status(200).json({
+        success: true,
+        data: clientData
+      });
+    }
+  
+  }catch(error){
+    console.error('Error fetching client data:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+  
+
+  
+  
+  
+});
 
 
   // WebSocket endpoint at /jobs
