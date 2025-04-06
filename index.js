@@ -70,23 +70,36 @@ app.ws('/jobs', (ws, req) => {
   const unsubscribe = jobsRef.onSnapshot(snapshot => {
     // Process each change in the snapshot
     snapshot.docChanges().forEach(change => {
+      let jobData = change.doc.data();
+      if (jobData.posted_date && jobData.posted_date.toDate) {
+        jobData.posted_date = jobData.posted_date.toDate().toISOString();
+      }
+      if (Array.isArray(jobData.milestones)) {
+        jobData.milestones = jobData.milestones.map(milestone => {
+          return {
+            ...milestone,
+            start_date: milestone.start_date?.toDate?.().toISOString() || milestone.start_date,
+            end_date: milestone.end_date?.toDate?.().toISOString() || milestone.end_date,
+          };
+        });
+      }
       if (change.type === 'added') {
         // Send the added job data to the client as JSON
         ws.send(JSON.stringify({
           type: 'added',
-          data: change.doc.data()
+          data: jobData
         }));
       }
       // Optionally handle "modified" or "removed" changes
       else if (change.type === 'modified') {
         ws.send(JSON.stringify({
           type: 'modified',
-          data: change.doc.data()
+          data: jobData
         }));
       } else if (change.type === 'removed') {
         ws.send(JSON.stringify({
           type: 'removed',
-          data: change.doc.data()
+          data: jobData
         }));
       }
     });
