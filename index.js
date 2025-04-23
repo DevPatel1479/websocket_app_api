@@ -158,9 +158,28 @@ app.ws('/jobs', (ws, req) => {
 });
 
 
-// Add this to your existing WebSocket server
 app.ws('/bids', (ws, req) => {
   console.log('New bid client connected');
+
+  // Helper function to initialize bids collection if needed
+  const initializeBidsCollection = async () => {
+    try {
+      const collections = await db.listCollections();
+      const bidsCollectionExists = collections.some(col => col.id === 'bids');
+      
+      if (!bidsCollectionExists) {
+        console.log('Creating bids collection as it does not exist');
+        // Create an empty document to initialize the collection
+        await db.collection('bids').doc('initial').set({
+          initializedAt: admin.firestore.FieldValue.serverTimestamp(),
+          purpose: 'Initial document to create bids collection'
+        });
+      }
+    } catch (error) {
+      console.error('Error checking/initializing bids collection:', error);
+      throw error;
+    }
+  };
 
   ws.on('message', async (message) => {
     try {
@@ -171,43 +190,99 @@ app.ws('/bids', (ws, req) => {
         
         // Validate required fields
         if (!bidData.jobId || !bidData.clientId || !bidData.bidAmount) {
-          ws.send(JSON.stringify({ error: 'Missing required fields' }));
+          ws.send(JSON.stringify({ 
+            type: 'error',
+            message: 'Missing required fields',
+            details: {
+              required: ['jobId', 'clientId', 'bidAmount'],
+              received: Object.keys(bidData)
+            }
+          }));
           return;
         }
 
-        // Add to Firestore
-        const docRef = await db.collection('bids').add({
+        // Ensure bids collection exists
+        await initializeBidsCollection();
+
+        // Prepare bid document
+        const bidDocument = {
           ...bidData,
           submittedAt: admin.firestore.FieldValue.serverTimestamp(),
           status: 'pending',
-          freelancerId: req.user.uid // Assuming you have auth
-        });
+          freelancerId: req.user?.uid || null,
+          // Add any additional default fields
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        };
 
-        // Update the job document to include this bid
-        await db.collection('jobs').doc(bidData.jobId).update({
-          bids: admin.firestore.FieldValue.arrayUnion({
+        // Add to Firestore with transaction for safety
+        await db.runTransaction(async (transaction) => {
+          // 1. Create the bid document
+          const docRef = db.collection('bids').doc();
+          transaction.set(docRef, bidDocument);
+          
+          // 2. Update the job document
+          const jobRef = db.collection('jobs').doc(bidData.jobId);
+          const jobDoc = await transaction.get(jobRef);
+          
+          if (!jobDoc.exists) {
+            throw new Error('Job does not exist');
+          }
+          
+          // Initialize bids array if it doesn't exist
+          const bidsArray = jobDoc.data()?.bids || [];
+          bidsArray.push({
             bidId: docRef.id,
             amount: bidData.bidAmount,
             status: 'pending',
-            submittedAt: new Date()
-          })
+            submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+            freelancerId: req.user?.uid || null
+          });
+          
+          transaction.update(jobRef, { bids: bidsArray });
+          
+          return docRef.id;
+        }).then((bidId) => {
+          // Success - notify client
+          ws.send(JSON.stringify({
+            type: 'bid_accepted',
+            bidId: bidId,
+            timestamp: new Date().toISOString()
+          }));
+          
+          // Optionally notify other clients about the new bid
+          // This would require additional WebSocket logic
+        }).catch((error) => {
+          console.error('Transaction failure:', error);
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Failed to process bid',
+            error: error.message
+          }));
         });
 
-        // Notify all interested parties
-        ws.send(JSON.stringify({
-          type: 'bid_accepted',
-          bidId: docRef.id
-        }));
       }
     } catch (error) {
       console.error('Error processing bid:', error);
-      ws.send(JSON.stringify({ error: error.message }));
+      ws.send(JSON.stringify({ 
+        type: 'error',
+        message: 'Internal server error',
+        error: error.message 
+      }));
     }
   });
 
-  ws.on('close', () => console.log('Bid client disconnected'));
-});
+  ws.on('close', () => {
+    console.log('Bid client disconnected');
+    // Clean up any resources if needed
+  });
 
+  // Send connection acknowledgement
+  ws.send(JSON.stringify({
+    type: 'connection_established',
+    message: 'Connected to bids endpoint',
+    timestamp: new Date().toISOString()
+  }));
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
