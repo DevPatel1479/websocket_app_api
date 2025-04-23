@@ -158,6 +158,56 @@ app.ws('/jobs', (ws, req) => {
 });
 
 
+// Add this to your existing WebSocket server
+app.ws('/bids', (ws, req) => {
+  console.log('New bid client connected');
+
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+      
+      if (data.type === 'bid_submitted') {
+        const bidData = data.data;
+        
+        // Validate required fields
+        if (!bidData.jobId || !bidData.clientId || !bidData.bidAmount) {
+          ws.send(JSON.stringify({ error: 'Missing required fields' }));
+          return;
+        }
+
+        // Add to Firestore
+        const docRef = await db.collection('bids').add({
+          ...bidData,
+          submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+          status: 'pending',
+          freelancerId: req.user.uid // Assuming you have auth
+        });
+
+        // Update the job document to include this bid
+        await db.collection('jobs').doc(bidData.jobId).update({
+          bids: admin.firestore.FieldValue.arrayUnion({
+            bidId: docRef.id,
+            amount: bidData.bidAmount,
+            status: 'pending',
+            submittedAt: new Date()
+          })
+        });
+
+        // Notify all interested parties
+        ws.send(JSON.stringify({
+          type: 'bid_accepted',
+          bidId: docRef.id
+        }));
+      }
+    } catch (error) {
+      console.error('Error processing bid:', error);
+      ws.send(JSON.stringify({ error: error.message }));
+    }
+  });
+
+  ws.on('close', () => console.log('Bid client disconnected'));
+});
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
