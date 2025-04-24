@@ -5,6 +5,8 @@ const bodyParser = require('body-parser');
 const expressWs = require('express-ws');
 
 const app = express();
+
+
 expressWs(app);
 app.use(cors());
 app.use(bodyParser.json());
@@ -21,6 +23,141 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
+
+
+// WebSocket connection handler
+
+
+// WebSocket endpoint at /jobs
+app.ws('/get/jobs', async (ws, req) => {
+  console.log('New client connected to /jobs');
+  
+  const jobsRef = db.collection('jobs');
+
+  try {
+
+    // 🔥 Send the initial full job list
+    const snapshot = await jobsRef.get();
+    const initialJobs = [];
+
+    snapshot.forEach(doc => {
+      let jobData = doc.data();
+
+      // Convert Firestore Timestamps to ISO strings
+      if (jobData.posted_date && jobData.posted_date.toDate) {
+        jobData.posted_date = jobData.posted_date.toDate().toISOString();
+      }
+
+      if (Array.isArray(jobData.milestones)) {
+        jobData.milestones = jobData.milestones.map(milestone => ({
+          ...milestone,
+          start_date: milestone.start_date?.toDate?.().toISOString() || milestone.start_date,
+          end_date: milestone.end_date?.toDate?.().toISOString() || milestone.end_date,
+        }));
+      }
+
+      initialJobs.push(jobData);
+    });
+
+    ws.send(JSON.stringify({
+      type: 'initial',
+      data: initialJobs
+    }));
+  } catch (err) {
+    console.error('Error fetching initial jobs:', err);
+    ws.send(JSON.stringify({ error: err.message }));
+  }
+
+  // ✅ Then listen for real-time changes
+  const unsubscribe = jobsRef.onSnapshot(snapshot => {
+    snapshot.docChanges().forEach(change => {
+      let jobData = change.doc.data();
+
+      if (jobData.posted_date && jobData.posted_date.toDate) {
+        jobData.posted_date = jobData.posted_date.toDate().toISOString();
+      }
+
+      if (Array.isArray(jobData.milestones)) {
+        jobData.milestones = jobData.milestones.map(milestone => ({
+          ...milestone,
+          start_date: milestone.start_date?.toDate?.().toISOString() || milestone.start_date,
+          end_date: milestone.end_date?.toDate?.().toISOString() || milestone.end_date,
+        }));
+      }
+
+      // Real-time change handling
+      if (change.type === 'added') {
+        ws.send(JSON.stringify({ type: 'added', data: jobData }));
+      } else if (change.type === 'modified') {
+        ws.send(JSON.stringify({ type: 'modified', data: jobData }));
+      } else if (change.type === 'removed') {
+        ws.send(JSON.stringify({ type: 'removed', data: jobData }));
+      }
+    });
+  }, err => {
+    console.error('Error listening to jobs collection:', err);
+    ws.send(JSON.stringify({ error: err.message }));
+  });
+
+  // ✅ Cleanup when socket is closed
+  ws.on('close', () => {
+    console.log('Client disconnected from /jobs');
+    unsubscribe();
+  });
+  ws.on('message', async (message) => {
+    try {
+      const msg = JSON.parse(message);
+      if (msg.type === 'edit_job') {
+        const { job_id, updates } = msg;
+  
+        const jobRef = db.collection('jobs').doc(job_id);
+        const doc = await jobRef.get();
+  
+        if (!doc.exists) {
+          ws.send(JSON.stringify({ error: 'Job not found' }));
+          return;
+        }
+  
+        // Only update allowed fields
+        const allowedFields = ['job_title', 'description', 'budget','required_skills'];
+        const filteredUpdates = {};
+  
+        for (const key of allowedFields) {
+          if (updates[key] !== undefined) {
+            filteredUpdates[key] = updates[key];
+          }
+        }
+        if (updates.required_skills !== undefined) {
+          const skills = updates.required_skills;
+          if (Array.isArray(skills)) {
+              filteredUpdates.required_skills = skills; // Directly use the array if provided
+          } else if (typeof skills === 'string') {
+              filteredUpdates.required_skills = skills.split(',').map(skill => skill.trim());  // Handle comma-separated string
+          }
+      }
+        await jobRef.update(filteredUpdates);
+        console.log(`🔄 Job ${job_id} updated with`, filteredUpdates);
+      }   else if (msg.type === 'delete_job') {
+        const { job_id } = msg;
+        const jobRef = db.collection('jobs').doc(job_id);
+        const doc = await jobRef.get();
+        if (!doc.exists) {
+          ws.send(JSON.stringify({ error: 'Job not found' }));
+          return;
+        }
+        await jobRef.delete();
+        console.log(`🗑️ Job ${job_id} deleted`);
+        // Firestore onSnapshot will automatically emit a 'removed' change
+      }
+  
+    } catch (err) {
+      console.error('Edit message error:', err.message);
+      ws.send(JSON.stringify({ error: 'Invalid edit format or error occurred' }));
+    }
+  });
+  
+
+});
 
 // POST endpoint for jobs
 app.post('/api/jobs', async (req, res) => {
@@ -64,7 +201,7 @@ app.post('/api/jobs', async (req, res) => {
 
 app.get('/api/client/profile/:id', async (req, res)=>{
   const uid = req.params.id;
-
+  
   if (!uid ){
     const msg = {
       "message" : "Client Id required!!"
