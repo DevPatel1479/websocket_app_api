@@ -30,9 +30,15 @@ const db = admin.firestore();
 
 // WebSocket endpoint at /jobs
 app.ws('/get/jobs', async (ws, req) => {
-  console.log('New client connected to /jobs');
-  
-  const jobsRef = db.collection('jobs');
+  console.log('Client connected to /get/jobs');
+
+  const clientId = req.query.client_id;
+  if (!clientId) {
+    ws.send(JSON.stringify({ error: 'Missing client_id parameter' }));
+    return ws.close();
+  }
+
+  const jobsRef = db.collection('jobs').where('client_id', '==', clientId);
 
   try {
 
@@ -295,10 +301,14 @@ app.ws('/jobs', (ws, req) => {
 });
 
 
+
+const connectedClients = new Set();
+
 app.ws('/bids', (ws, req) => {
   console.log('New bid client connected');
+  connectedClients.add(ws);
 
-  // Helper function to initialize bids collection if needed
+  // 🔧 Define this BEFORE using it in ws.on('message')
   const initializeBidsCollection = async () => {
     try {
       const collections = await db.listCollections();
@@ -306,28 +316,40 @@ app.ws('/bids', (ws, req) => {
       
       if (!bidsCollectionExists) {
         console.log('Creating bids collection as it does not exist');
-        // Create an empty document to initialize the collection
         await db.collection('bids').doc('initial').set({
           initializedAt: admin.firestore.FieldValue.serverTimestamp(),
           purpose: 'Initial document to create bids collection'
         });
       }
     } catch (error) {
-      console.error('Error checking/initializing bids collection:', error);
+      console.error('Error initializing bids collection:', error);
       throw error;
     }
   };
 
+  const broadcastNewBid = (bidData) => {
+    const payload = JSON.stringify({
+      type: 'new_bid',
+      data: bidData
+    });
+
+    for (const client of connectedClients) {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        client.send(payload);
+      }
+    }
+  };
+
+  // 🧠 Always use `ws` inside this block
   ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
-      
+
       if (data.type === 'bid_submitted') {
         const bidData = data.data;
-        
-        // Validate required fields
+
         if (!bidData.jobId || !bidData.clientId || !bidData.bidAmount) {
-          ws.send(JSON.stringify({ 
+          ws.send(JSON.stringify({
             type: 'error',
             message: 'Missing required fields',
             details: {
@@ -338,34 +360,27 @@ app.ws('/bids', (ws, req) => {
           return;
         }
 
-        // Ensure bids collection exists
-        await initializeBidsCollection();
+        await initializeBidsCollection();  // ✅ Now it's defined and in scope
 
-        // Prepare bid document
         const bidDocument = {
           ...bidData,
           submittedAt: admin.firestore.FieldValue.serverTimestamp(),
           status: 'pending',
           freelancerId: req.user?.uid || null,
-          // Add any additional default fields
           lastUpdated: admin.firestore.FieldValue.serverTimestamp()
         };
 
-        // Add to Firestore with transaction for safety
         await db.runTransaction(async (transaction) => {
-          // 1. Create the bid document
           const docRef = db.collection('bids').doc();
           transaction.set(docRef, bidDocument);
-          
-          // 2. Update the job document
+
           const jobRef = db.collection('jobs').doc(bidData.jobId);
           const jobDoc = await transaction.get(jobRef);
-          
+
           if (!jobDoc.exists) {
             throw new Error('Job does not exist');
           }
-          
-          // Initialize bids array if it doesn't exist
+
           const bidsArray = jobDoc.data()?.bids || [];
           bidsArray.push({
             bidId: docRef.id,
@@ -374,20 +389,26 @@ app.ws('/bids', (ws, req) => {
             submittedAt: admin.firestore.FieldValue.serverTimestamp(),
             freelancerId: req.user?.uid || null
           });
-          
+
           transaction.update(jobRef, { bids: bidsArray });
-          
+
           return docRef.id;
         }).then((bidId) => {
-          // Success - notify client
+          const createdBid = {
+            ...bidData,
+            bidId,
+            submittedAt: new Date().toISOString(),
+            freelancerId: req.user?.uid || null,
+            status: 'pending'
+          };
+
           ws.send(JSON.stringify({
             type: 'bid_accepted',
-            bidId: bidId,
+            bidId,
             timestamp: new Date().toISOString()
           }));
-          
-          // Optionally notify other clients about the new bid
-          // This would require additional WebSocket logic
+
+          broadcastNewBid(createdBid);
         }).catch((error) => {
           console.error('Transaction failure:', error);
           ws.send(JSON.stringify({
@@ -396,30 +417,30 @@ app.ws('/bids', (ws, req) => {
             error: error.message
           }));
         });
-
       }
     } catch (error) {
-      console.error('Error processing bid:', error);
-      ws.send(JSON.stringify({ 
+      console.error('Error processing message:', error);
+      ws.send(JSON.stringify({
         type: 'error',
-        message: 'Internal server error',
-        error: error.message 
+        message: 'Invalid or malformed request',
+        error: error.message
       }));
     }
   });
 
   ws.on('close', () => {
     console.log('Bid client disconnected');
-    // Clean up any resources if needed
+    connectedClients.delete(ws);
   });
 
-  // Send connection acknowledgement
   ws.send(JSON.stringify({
     type: 'connection_established',
     message: 'Connected to bids endpoint',
     timestamp: new Date().toISOString()
   }));
 });
+
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
