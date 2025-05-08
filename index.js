@@ -78,7 +78,7 @@ app.ws('/get/jobs', async (ws, req) => {
   const unsubscribe = jobsRef.onSnapshot(snapshot => {
     snapshot.docChanges().forEach(change => {
       let jobData = change.doc.data();
-
+      jobData.job_id = change.doc.id; 
       if (jobData.posted_date && jobData.posted_date.toDate) {
         jobData.posted_date = jobData.posted_date.toDate().toISOString();
       }
