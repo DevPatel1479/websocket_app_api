@@ -3,6 +3,8 @@ const admin = require('firebase-admin');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const expressWs = require('express-ws');
+const url = require('url');
+
 
 const app = express();
 
@@ -440,6 +442,175 @@ app.ws('/bids', (ws, req) => {
   }));
 });
 
+
+const formatTimestamp = (ts) => ts?.toDate?.().toISOString() || null;
+
+
+app.ws('/get/api/bids', async (ws, req) => {
+  const queryParams = url.parse(req.url, true).query;
+  const { client_id, limit_record } = queryParams;
+
+  if (!client_id) {
+    return ws.send(JSON.stringify({ success: false, error: 'Missing client_id' }));
+  }
+  if (!limit_record) {
+    return ws.send(JSON.stringify({ success: false, error: 'Missing limit_record' }));
+  }
+
+  const isAll = limit_record.toLowerCase() === 'all';
+  let limitNum = null;
+  if (!isAll) {
+    limitNum = parseInt(limit_record, 10);
+    if (isNaN(limitNum) || limitNum <= 0) {
+      return ws.send(JSON.stringify({ success: false, error: 'limit_record must be a positive integer or "all"' }));
+    }
+  }
+
+  // --- 2. Build the base query for initial fetch ---
+  let baseQuery = db
+    .collection('bids')
+    .where('clientId', '==', client_id)
+    .orderBy('submittedAt', 'desc');
+
+  if (!isAll) {
+
+    baseQuery = baseQuery.limit(limitNum);
+  }
+
+  // Keep track of the IDs we've already sent, so we don't resend onSnapshot's initial batch
+  const sentIds = new Set();
+
+  try {
+    // --- 3. Do one‐time fetch of existing documents ---
+    const snapshot = await baseQuery.get();
+    const initialData = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      data.submittedAt = formatTimestamp(data.submittedAt);
+      data.lastUpdated = formatTimestamp(data.lastUpdated);
+      data.estimatedCompletionDate = formatTimestamp(data.estimatedCompletionDate);
+
+      sentIds.add(doc.id);
+      initialData.push({ id: doc.id, ...data });
+    });
+
+    // Send initial batch
+    ws.send(JSON.stringify({
+      success: true,
+      type: 'initial',
+      data: initialData
+    }));
+  } catch (err) {
+    console.error('Error fetching initial bids:', err);
+    return ws.send(JSON.stringify({ success: false, error: 'Error fetching initial bids' }));
+  }
+
+  // --- 4. Set up real‐time listener for new matching documents ---
+  let listenerQuery = db
+    .collection('bids')
+    .where('clientId', '==', client_id)
+    .orderBy('submittedAt', 'desc');  // ascending so new docs come last
+
+  if (!isAll) {
+    console.log(`limit ${limitNum}`);
+    listenerQuery = listenerQuery.limit(limitNum);
+  } 
+
+
+  const unsubscribe = listenerQuery.onSnapshot(snapshot => {
+    const newRecords = [];
+    
+   snapshot.docChanges().forEach(change => {
+      if (change.type === 'added' && !sentIds.has(change.doc.id)) {
+        const docData = change.doc.data();
+
+        // Format timestamps
+        docData.submittedAt = formatTimestamp(docData.submittedAt);
+        docData.lastUpdated = formatTimestamp(docData.lastUpdated);
+        docData.estimatedCompletionDate = formatTimestamp(docData.estimatedCompletionDate);
+
+        sentIds.add(change.doc.id);
+        newRecords.push({ id: change.doc.id, ...docData });
+      }
+    });    
+    if (newRecords.length) {
+      ws.send(JSON.stringify({
+        success: true,
+        type: 'update',
+        data: newRecords
+      }));
+    }
+  }, err => {
+    console.error('Realtime listener error:', err);
+    ws.send(JSON.stringify({ success: false, error: 'Realtime listener error' }));
+  });
+
+  // --- 5. Clean up when client disconnects ---
+  ws.on('close', () => {
+    unsubscribe();
+  });
+
+  // Optional: handle client‐sent pings or commands
+  ws.on('message', msg => {
+    // e.g. handle heartbeat or client messages
+  });
+});
+
+
+// GET /api/job/:job_id - Fetch a single job by job_id
+app.get('/api/job/data/:job_id', async (req, res) => {
+  const { job_id } = req.params;
+  const { limit_record } = req.query;
+
+  try {
+    const jobsRef = db.collection('jobs');
+
+    // Fetch all job titles
+    if (limit_record === 'all') {
+      const snapshot = await jobsRef.get();
+      if (snapshot.empty) {
+        return res.status(404).json({
+          success: false,
+          message: 'No jobs found',
+        });
+      }
+
+      const jobTitles = snapshot.docs.map(doc => doc.data().job_title || 'Untitled');
+      return res.status(200).json({
+        success: true,
+        message: 'Job titles fetched successfully',
+        data: jobTitles,
+      });
+    }
+
+    // Fetch specific job by job_id
+    const querySnapshot = await jobsRef.where('job_id', '==', job_id).get();
+
+    if (querySnapshot.empty) {
+      return res.status(404).json({
+        success: false,
+        message: `No job found with job_id: ${job_id}`,
+      });
+    }
+
+    const jobDoc = querySnapshot.docs[0];
+    const jobData = jobDoc.data();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Job fetched successfully',
+      data: jobData,
+    });
+
+  } catch (error) {
+    console.error('Error fetching job:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'An error occurred while fetching the job(s)',
+      error: error.message,
+    });
+  }
+});
 
 
 const PORT = process.env.PORT || 3000;
